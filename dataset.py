@@ -325,6 +325,100 @@ def load_german(dataset, sens_attr="Gender", predict_attr="GoodCustomer", path="
     return adj_norm_sp, edge_index, features, labels, train_mask, val_mask, test_mask, sens
 
 
+def load_pokec(dataset, sens_attr="region", predict_attr="I_am_working_in_field", path="./dataset/pokec/", label_number=1000, sens_number=500,
+               seed=20, split_ratio=None, val_idx=True):
+    """Load data"""
+    # print('Loading {} dataset from {}'.format(dataset, path))
+
+    idx_features_labels = pd.read_csv(os.path.join(path, "{}.csv".format(dataset)))
+    header = list(idx_features_labels.columns)
+    header.remove("user_id")
+
+    # header.remove(sens_attr)
+    header.remove(predict_attr)
+
+    features = sp.csr_matrix(idx_features_labels[header], dtype=np.float32)
+    labels = idx_features_labels[predict_attr].values
+    # labels[labels == -1] = 0
+
+    # build graph
+    idx = np.array(idx_features_labels["user_id"], dtype=int)
+    idx_map = {j: i for i, j in enumerate(idx)}
+    edges_unordered = np.genfromtxt(os.path.join(path, "{}_edges.txt".format(dataset)), dtype=int)
+
+    edges = np.array(list(map(idx_map.get, edges_unordered.flatten())),
+                     dtype=int).reshape(edges_unordered.shape)
+
+    # delete edge connecting nodes with negative label
+    # label_del_idx = np.where(labels < 0)[0]
+    # del_target = np.isin(edges[:, 0], label_del_idx)
+    # del_source = np.isin(edges[:, 1], label_del_idx)
+    # del_edge = del_target + del_source
+    # edges_new = edges[~del_edge]
+    # adj = sp.coo_matrix((np.ones(edges_new.shape[0]), (edges_new[:, 0], edges_new[:, 1])),
+    #                     shape=(labels.shape[0], labels.shape[0]),
+    #                     dtype=np.float32)
+
+    adj = sp.coo_matrix((np.ones(edges.shape[0]), (edges[:, 0], edges[:, 1])),
+                        shape=(labels.shape[0], labels.shape[0]),
+                        dtype=np.float32)
+    # build symmetric adjacency matrix
+    adj = adj + adj.T.multiply(adj.T > adj) - adj.multiply(adj.T > adj)
+
+    # features = normalize(features)
+    adj = adj + sp.eye(adj.shape[0])
+    
+    adj_norm = sys_normalized_adjacency(adj)
+    adj_norm_sp = sparse_mx_to_torch_sparse_tensor(adj_norm)
+
+    edge_index, _ = from_scipy_sparse_matrix(adj)
+
+    features = torch.FloatTensor(np.array(features.todense()))
+    labels = torch.LongTensor(labels)
+    # adj = sparse_mx_to_torch_sparse_tensor(adj)
+
+    import random
+    # seed = 20
+    random.seed(seed)
+    label_idx = np.where(labels >= 0)[0]
+    # print("label_num", label_idx.shape)
+    # print("label=0", np.where(labels == 0)[0].shape)
+    random.shuffle(label_idx)
+
+    if split_ratio is None:
+        split_ratio = [0.5, 0.25, 0.25]
+
+    idx_train = label_idx[:min(int(split_ratio[0] * len(label_idx)), label_number)]
+    if val_idx:
+        idx_val = label_idx[int(split_ratio[0] * len(label_idx)):int((split_ratio[0] + split_ratio[1]) * len(label_idx))]
+        idx_test = label_idx[int((split_ratio[0] + split_ratio[1]) * len(label_idx)):]
+    else:
+        idx_test = label_idx[label_number:]
+        idx_val = idx_test
+
+    sens = idx_features_labels[sens_attr].values
+
+    sens_idx = set(np.where(sens >= 0)[0])
+    idx_test = np.asarray(list(sens_idx & set(idx_test)))
+    sens = torch.FloatTensor(sens)
+    idx_sens_train = list(sens_idx - set(idx_val) - set(idx_test))
+    random.seed(seed)
+    random.shuffle(idx_sens_train)
+    idx_sens_train = torch.LongTensor(idx_sens_train[:sens_number])
+
+    idx_train = torch.LongTensor(idx_train)
+    idx_val = torch.LongTensor(idx_val)
+    idx_test = torch.LongTensor(idx_test)
+    train_mask = index_to_mask(features.shape[0], torch.LongTensor(idx_train))
+    val_mask = index_to_mask(features.shape[0], torch.LongTensor(idx_val))
+    test_mask = index_to_mask(features.shape[0], torch.LongTensor(idx_test))
+
+    # random.shuffle(sens_idx)
+    # a = torch.unique(labels)
+    # return adj, features, labels, idx_train, idx_val, idx_test, sens, idx_sens_train
+    return adj, edge_index, features, labels, train_mask, val_mask, test_mask, sens
+
+
 def get_dataset(dataname, top_k):
     if(dataname == 'credit'):
         load, label_num = load_credit, 6000
@@ -332,6 +426,10 @@ def get_dataset(dataname, top_k):
         load, label_num = load_bail, 100
     elif(dataname == 'german'):
         load, label_num = load_german, 100
+    elif(dataname == 'pokec_z'):
+        load, label_num = load_pokec, 4000
+    elif(dataname == 'pokec_n'):
+        load, label_num = load_pokec, 3500
 
     adj_norm_sp, edge_index, features, labels, train_mask, val_mask, test_mask, sens = load(
         dataset=dataname, label_number=label_num)
@@ -340,6 +438,8 @@ def get_dataset(dataname, top_k):
         sens_idx = 1
     elif(dataname == 'bail' or dataname == 'german'):
         sens_idx = 0
+    elif(dataname == 'pokec_z' or dataname == 'pokec_n'):
+        sens_idx = 3
 
     x_max, x_min = torch.max(features, dim=0)[
         0], torch.min(features, dim=0)[0]
@@ -355,4 +455,5 @@ def get_dataset(dataname, top_k):
         # corr_idx = np.concatenate((corr_idx[:top_k], corr_idx[-top_k:]))
         corr_idx = corr_idx[:top_k]
 
+    labels[labels > 1] = 1
     return Data(x=features, edge_index=edge_index, adj_norm_sp=adj_norm_sp, y=labels.float(), train_mask=train_mask, val_mask=val_mask, test_mask=test_mask, sens=sens), sens_idx, corr_matrix, corr_idx, x_min, x_max
